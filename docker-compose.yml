@@ -14,3 +14,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # "db" resolves to the database container on the compose network.
+      DATABASE_URL: postgresql://ledger:ledger@db:5432/ledger
+    depends_on:
+      db:
+        condition: service_healthy
