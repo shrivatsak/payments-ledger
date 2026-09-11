@@ -1,0 +1,2 @@
+-- Schema is added in M1 (accounts, payments, ledger_entries).
+-- Placeholder so docker-compose can mount this file in M0.
