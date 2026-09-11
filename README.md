@@ -4,15 +4,7 @@
 
 A small payments API I built to understand how real payment systems avoid double charging and double spending. You can create accounts, deposit money, transfer between accounts, refund a transfer and see history. The interesting bits are idempotency keys (retrying a request never charges twice), a double-entry ledger, and row locks so concurrent transfers can't overdraw an account. Money is stored as integer paise, never floats.
 
-FastAPI + psycopg 3 with plain SQL (no ORM) on PostgreSQL 16. INR only, no auth.
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    B["Browser (static dashboard)"] -- "fetch + Idempotency-Key" --> A["FastAPI"]
-    A -- "one transaction per request" --> P[("PostgreSQL")]
-```
+FastAPI + psycopg 3 with plain SQL
 
 ## Run it
 
