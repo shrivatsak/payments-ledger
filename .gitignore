@@ -8,4 +8,5 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+build/
 .DS_Store

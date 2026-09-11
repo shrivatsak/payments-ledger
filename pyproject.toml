@@ -1,3 +1,27 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "payments-ledger"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "psycopg[binary]==3.2.3",
+    "psycopg_pool==3.2.4",
+    "pydantic==2.10.4",
+    "pytest==8.3.4",
+    "httpx==0.28.1",
+    "ruff==0.8.4",
+]
+
+# The repo has several top-level directories (app/, db/, tests/); tell setuptools
+# which one is the package instead of letting it guess and refuse.
+[tool.setuptools]
+packages = ["app"]
+
 [tool.pytest.ini_options]
 # Put the repo root on sys.path so `from app... import` works no matter how
 # pytest is launched. `python -m pytest` adds the cwd itself; bare `pytest`
