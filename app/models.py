@@ -21,6 +21,24 @@ class DepositRequest(BaseModel):
     amount_paise: int = Field(gt=0, le=MAX_AMOUNT_PAISE)
 
 
+class TransferRequest(BaseModel):
+    from_account_id: int = Field(gt=0)
+    to_account_id: int = Field(gt=0)
+    amount_paise: int = Field(gt=0, le=MAX_AMOUNT_PAISE)
+
+
+class PaymentResponse(BaseModel):
+    id: int
+    type: str
+    from_account_id: int
+    to_account_id: int
+    amount_paise: int
+    status: str
+    failure_reason: str | None
+    refund_of: int | None
+    created_at: datetime
+
+
 class TransactionResponse(BaseModel):
     id: int
     payment_id: int

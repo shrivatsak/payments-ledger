@@ -4,7 +4,14 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from app.db import pool
-from app.errors import ACCOUNT_NOT_FOUND, IDEMPOTENCY_KEY_MISMATCH, LedgerError
+from app.errors import (
+    ACCOUNT_NOT_FOUND,
+    IDEMPOTENCY_KEY_MISMATCH,
+    INSUFFICIENT_FUNDS,
+    PAYMENT_NOT_FOUND,
+    SAME_ACCOUNT,
+    LedgerError,
+)
 from app.idempotency import request_hash
 
 
@@ -117,6 +124,73 @@ def create_deposit(idempotency_key: str, account_id: int, amount_paise: int) -> 
             return _complete(conn, payment)
 
 
+# --- transfers --------------------------------------------------------------
+
+
+def create_transfer(
+    idempotency_key: str, from_account_id: int, to_account_id: int, amount_paise: int
+) -> PaymentResult:
+    if from_account_id == to_account_id:
+        raise LedgerError(
+            400, SAME_ACCOUNT, "A transfer must be between two different accounts."
+        )
+
+    body_hash = request_hash(
+        "/transfers",
+        {
+            "from_account_id": from_account_id,
+            "to_account_id": to_account_id,
+            "amount_paise": amount_paise,
+        },
+    )
+
+    with pool.connection() as conn:
+        with conn.transaction():
+            _require_account(conn, from_account_id)
+            _require_account(conn, to_account_id)
+
+            payment = _claim_idempotency_key(
+                conn,
+                idempotency_key=idempotency_key,
+                body_hash=body_hash,
+                payment_type="TRANSFER",
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                amount_paise=amount_paise,
+            )
+            if payment is None:
+                return _replay(conn, idempotency_key, body_hash)
+
+            _lock_accounts(conn, from_account_id, to_account_id)
+
+            # Read the balance only after the lock is held. Any other transfer out of
+            # this account is stuck waiting on the same row, so the number we read
+            # cannot be undercut by an uncommitted debit -> no double-spend.
+            balance = _balance(conn, from_account_id)
+            if balance < amount_paise:
+                return _fail_insufficient_funds(conn, payment, balance)
+
+            _write_double_entry(
+                conn, payment["id"], from_account_id, to_account_id, amount_paise
+            )
+            return _complete(conn, payment)
+
+
+# --- payments ---------------------------------------------------------------
+
+
+def get_payment(payment_id: int) -> dict:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id, type, from_account_id, to_account_id, amount_paise, status,"
+            " failure_reason, refund_of, created_at FROM payments WHERE id = %s",
+            (payment_id,),
+        ).fetchone()
+    if row is None:
+        raise LedgerError(404, PAYMENT_NOT_FOUND, f"Payment {payment_id} does not exist.")
+    return row
+
+
 # --- shared idempotency machinery -------------------------------------------
 
 
@@ -180,6 +254,47 @@ def _replay(conn: Connection, idempotency_key: str, body_hash: str) -> PaymentRe
         )
 
     return PaymentResult(row["response_code"], row["response_body"], replayed=True)
+
+
+def _lock_accounts(conn: Connection, *account_ids: int) -> None:
+    """Take a row lock on each account, always lowest id first.
+
+    The consistent order is what prevents deadlock: if A->B locked A then B while
+    B->A locked B then A, each would hold the row the other is waiting for and
+    Postgres would have to kill one of them. Locks are released at commit.
+    """
+    for account_id in sorted(set(account_ids)):
+        conn.execute("SELECT id FROM accounts WHERE id = %s FOR UPDATE", (account_id,))
+
+
+def _balance(conn: Connection, account_id: int) -> int:
+    return conn.execute(
+        "SELECT COALESCE(SUM(amount_paise), 0)::BIGINT AS balance"
+        " FROM ledger_entries WHERE account_id = %s",
+        (account_id,),
+    ).fetchone()["balance"]
+
+
+def _fail_insufficient_funds(
+    conn: Connection, payment: dict, balance_paise: int
+) -> PaymentResult:
+    """A rejected payment is still a recorded fact: the row stays, with no ledger
+    entries, so a retry with the same key replays the 402 instead of re-checking."""
+    body = {
+        "error": {
+            "code": INSUFFICIENT_FUNDS,
+            "message": (
+                f"Account {payment['from_account_id']} holds {balance_paise} paise,"
+                f" less than the {payment['amount_paise']} paise required."
+            ),
+        }
+    }
+    conn.execute(
+        "UPDATE payments SET status = 'FAILED', failure_reason = %s, response_code = 402,"
+        " response_body = %s WHERE id = %s",
+        (INSUFFICIENT_FUNDS, Jsonb(body), payment["id"]),
+    )
+    return PaymentResult(402, body)
 
 
 def _write_double_entry(

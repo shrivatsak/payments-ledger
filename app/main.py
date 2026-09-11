@@ -9,7 +9,9 @@ from app.models import (
     AccountResponse,
     CreateAccountRequest,
     DepositRequest,
+    PaymentResponse,
     TransactionResponse,
+    TransferRequest,
 )
 from app.service import PaymentResult
 
@@ -54,6 +56,23 @@ def create_deposit(
     key = validate_key(idempotency_key)
     result = service.create_deposit(key, request.account_id, request.amount_paise)
     return _payment_response(result)
+
+
+@app.post("/transfers")
+def create_transfer(
+    request: TransferRequest,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
+    key = validate_key(idempotency_key)
+    result = service.create_transfer(
+        key, request.from_account_id, request.to_account_id, request.amount_paise
+    )
+    return _payment_response(result)
+
+
+@app.get("/payments/{payment_id}", response_model=PaymentResponse)
+def get_payment(payment_id: int):
+    return service.get_payment(payment_id)
 
 
 def _payment_response(result: PaymentResult) -> JSONResponse:
