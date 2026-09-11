@@ -125,3 +125,10 @@ def test_transactions_show_type_and_counterparty(client, system_account_id):
 
 def test_transactions_for_unknown_account_is_404(client):
     assert client.get("/accounts/9999/transactions").status_code == 404
+
+
+def test_dashboard_is_served_at_root(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Simulate network retry" in response.text

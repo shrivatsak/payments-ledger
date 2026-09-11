@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payments Ledger</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1c1f24; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #1d4ed8; --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+  .wide { grid-column: 1 / -1; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, button { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  input, select { min-width: 150px; }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.secondary { background: #fff; color: var(--ink); border-color: var(--line); }
+  button:disabled { opacity: .5; cursor: wait; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.selected { background: #eff6ff; }
+  .pos { color: var(--ok); } .neg { color: var(--bad); }
+  .empty { color: var(--muted); padding: 12px 0; }
+  #banner { display: none; margin-bottom: 16px; padding: 10px 14px; border-radius: 6px; border: 1px solid; }
+  #banner.error { display: block; background: #fef2f2; border-color: #fecaca; color: var(--bad); }
+  #banner.ok { display: block; background: #f0fdf4; border-color: #bbf7d0; color: var(--ok); }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .retry { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .retry .card { border-width: 2px; }
+  .retry .card.replayed { border-color: var(--warn); }
+  .retry .card.fresh { border-color: var(--ok); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.fresh { background: #dcfce7; color: var(--ok); }
+  .badge.replayed { background: #fef3c7; color: var(--warn); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; }
+  dt { color: var(--muted); } dd { margin: 0; }
+  .summary { margin-top: 12px; padding: 10px 14px; background: #eff6ff; border-radius: 6px; }
+  @media (max-width: 640px) { .retry { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Payments Ledger</h1>
+  <p class="sub">Idempotent deposits and transfers on a double-entry ledger. All amounts are integer paise (100 paise = ₹1).</p>
+
+  <div id="banner" role="alert"></div>
+
+  <div class="grid">
+    <section class="card wide">
+      <h2>Accounts</h2>
+      <form id="create-account">
+        <label>Owner name <input name="owner_name" required maxlength="255" placeholder="e.g. Asha"></label>
+        <button type="submit">Create account</button>
+        <button type="button" class="secondary" id="refresh">Refresh</button>
+      </form>
+      <table>
+        <thead><tr><th>ID</th><th>Owner</th><th class="num">Balance</th><th class="num">Paise</th><th></th></tr></thead>
+        <tbody id="accounts"></tbody>
+      </table>
+      <p class="empty" id="accounts-empty">No accounts yet.</p>
+    </section>
+
+    <section class="card">
+      <h2>Deposit</h2>
+      <form id="deposit">
+        <label>Account <select name="account_id" data-accounts required></select></label>
+        <label>Amount (paise) <input name="amount_paise" type="number" min="1" max="10000000" step="1" required value="50000"></label>
+        <button type="submit">Deposit</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Transfer</h2>
+      <form id="transfer">
+        <label>From <select name="from_account_id" data-accounts required></select></label>
+        <label>To <select name="to_account_id" data-accounts required></select></label>
+        <label>Amount (paise) <input name="amount_paise" type="number" min="1" max="10000000" step="1" required value="10000"></label>
+        <button type="submit">Transfer</button>
+        <button type="button" class="secondary" id="simulate-retry">Simulate network retry</button>
+      </form>
+    </section>
+
+    <section class="card wide" id="retry-section" hidden>
+      <h2>Network retry simulation</h2>
+      <p class="sub">The same transfer is sent twice with the <em>same</em> Idempotency-Key, exactly as a client would after a timeout. Key: <code id="retry-key"></code></p>
+      <div class="retry">
+        <div class="card" id="retry-first"></div>
+        <div class="card" id="retry-second"></div>
+      </div>
+      <div class="summary" id="retry-summary"></div>
+    </section>
+
+    <section class="card wide">
+      <h2 id="tx-title">Transactions</h2>
+      <p class="empty" id="tx-empty">Select an account to see its ledger entries.</p>
+      <table id="tx-table" hidden>
+        <thead><tr><th>When</th><th>Payment</th><th>Type</th><th>Counterparty</th><th class="num">Amount (paise)</th></tr></thead>
+        <tbody id="transactions"></tbody>
+      </table>
+    </section>
+  </div>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let accounts = [];
+  let selectedAccountId = null;
+
+  // --- API ------------------------------------------------------------------
+
+  async function api(path, { method = "GET", body, key } = {}) {
+    const headers = {};
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (key) headers["Idempotency-Key"] = key;
+    const response = await fetch(path, {
+      method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => null);
+    return {
+      status: response.status,
+      ok: response.ok,
+      replayed: response.headers.get("Idempotent-Replayed") === "true",
+      data,
+    };
+  }
+
+  function describeError(result) {
+    if (result.data && result.data.error) {
+      return `${result.data.error.code}: ${result.data.error.message}`;
+    }
+    if (result.data && Array.isArray(result.data.detail)) {
+      return "Validation error: " + result.data.detail
+        .map((d) => `${d.loc.slice(1).join(".")} ${d.msg}`).join("; ");
+    }
+    return `HTTP ${result.status}`;
+  }
+
+  function banner(kind, text) {
+    const el = $("banner");
+    el.className = kind;
+    el.textContent = text;
+  }
+
+  // Integer maths only: 12345 paise -> "₹123.45". No floats anywhere near money.
+  function rupees(paise) {
+    const sign = paise < 0 ? "-" : "";
+    const abs = Math.abs(paise);
+    const whole = Math.floor(abs / 100);
+    const cents = String(abs % 100).padStart(2, "0");
+    return `${sign}₹${whole.toLocaleString("en-IN")}.${cents}`;
+  }
+
+  function cell(text, className) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (className) td.className = className;
+    return td;
+  }
+
+  // --- accounts -------------------------------------------------------------
+
+  async function refreshAccounts() {
+    const result = await api("/accounts");
+    if (!result.ok) return banner("error", describeError(result));
+    accounts = result.data;
+    renderAccounts();
+    renderSelects();
+    if (selectedAccountId !== null) await loadTransactions(selectedAccountId);
+  }
+
+  function renderAccounts() {
+    const tbody = $("accounts");
+    tbody.replaceChildren();
+    $("accounts-empty").hidden = accounts.length > 0;
+    for (const account of accounts) {
+      const tr = document.createElement("tr");
+      if (account.id === selectedAccountId) tr.className = "selected";
+      tr.append(
+        cell(account.id),
+        cell(account.owner_name),
+        cell(rupees(account.balance_paise), "num"),
+        cell(account.balance_paise.toLocaleString("en-IN"), "num"),
+      );
+      const td = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary";
+      button.textContent = "History";
+      button.addEventListener("click", () => loadTransactions(account.id));
+      td.append(button);
+      tr.append(td);
+      tbody.append(tr);
+    }
+  }
+
+  function renderSelects() {
+    for (const select of document.querySelectorAll("select[data-accounts]")) {
+      const previous = select.value;
+      select.replaceChildren();
+      for (const account of accounts) {
+        const option = document.createElement("option");
+        option.value = account.id;
+        option.textContent = `#${account.id} ${account.owner_name} (${rupees(account.balance_paise)})`;
+        select.append(option);
+      }
+      if ([...select.options].some((o) => o.value === previous)) select.value = previous;
+    }
+    // Default the transfer "To" to a different account than "From".
+    const to = document.querySelector('#transfer select[name="to_account_id"]');
+    if (accounts.length > 1 && to.selectedIndex === 0) to.selectedIndex = 1;
+  }
+
+  $("create-account").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const result = await api("/accounts", {
+      method: "POST", body: { owner_name: form.owner_name.value.trim() },
+    });
+    if (!result.ok) return banner("error", describeError(result));
+    banner("ok", `Created account #${result.data.id} for ${result.data.owner_name}.`);
+    form.reset();
+    await refreshAccounts();
+  });
+
+  $("refresh").addEventListener("click", refreshAccounts);
+
+  // --- transactions ---------------------------------------------------------
+
+  async function loadTransactions(accountId) {
+    selectedAccountId = accountId;
+    const result = await api(`/accounts/${accountId}/transactions?limit=50`);
+    if (!result.ok) return banner("error", describeError(result));
+    const account = accounts.find((a) => a.id === accountId);
+    $("tx-title").textContent = account
+      ? `Transactions — #${account.id} ${account.owner_name}` : "Transactions";
+    const tbody = $("transactions");
+    tbody.replaceChildren();
+    $("tx-empty").hidden = result.data.length > 0;
+    $("tx-empty").textContent = "No transactions yet.";
+    $("tx-table").hidden = result.data.length === 0;
+    for (const entry of result.data) {
+      const tr = document.createElement("tr");
+      const signed = (entry.amount_paise > 0 ? "+" : "") + entry.amount_paise.toLocaleString("en-IN");
+      tr.append(
+        cell(new Date(entry.created_at).toLocaleString()),
+        cell(`#${entry.payment_id}`),
+        cell(entry.type),
+        cell(`#${entry.counterparty_account_id} ${entry.counterparty_owner_name}`),
+        cell(signed, "num " + (entry.amount_paise > 0 ? "pos" : "neg")),
+      );
+      tbody.append(tr);
+    }
+    renderAccounts();
+  }
+
+  // --- money movement -------------------------------------------------------
+  // Every submission gets a brand-new key: the server treats it as a new request.
+
+  $("deposit").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const result = await api("/deposits", {
+      method: "POST",
+      key: crypto.randomUUID(),
+      body: { account_id: Number(form.account_id.value), amount_paise: Number(form.amount_paise.value) },
+    });
+    if (!result.ok) return banner("error", describeError(result));
+    banner("ok", `Deposit #${result.data.id} completed: ${rupees(result.data.amount_paise)} into account #${result.data.to_account_id}.`);
+    await refreshAccounts();
+  });
+
+  function transferBody() {
+    const form = $("transfer");
+    return {
+      from_account_id: Number(form.from_account_id.value),
+      to_account_id: Number(form.to_account_id.value),
+      amount_paise: Number(form.amount_paise.value),
+    };
+  }
+
+  $("transfer").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const result = await api("/transfers", {
+      method: "POST", key: crypto.randomUUID(), body: transferBody(),
+    });
+    if (!result.ok) return banner("error", describeError(result));
+    banner("ok", `Transfer #${result.data.id} completed: ${rupees(result.data.amount_paise)} from #${result.data.from_account_id} to #${result.data.to_account_id}.`);
+    await refreshAccounts();
+  });
+
+  // --- retry simulation -----------------------------------------------------
+  // A client that times out never sees the first response, so it re-sends the
+  // identical request with the identical key. The second response must be the
+  // stored copy of the first, and the money must move exactly once.
+
+  async function senderBalance(accountId) {
+    const result = await api(`/accounts/${accountId}`);
+    return result.ok ? result.data.balance_paise : null;
+  }
+
+  function renderAttempt(container, label, result, balanceAfter) {
+    container.className = "card " + (result.replayed ? "replayed" : "fresh");
+    container.replaceChildren();
+    const heading = document.createElement("h2");
+    heading.textContent = label + " ";
+    const badge = document.createElement("span");
+    badge.className = "badge " + (result.replayed ? "replayed" : "fresh");
+    badge.textContent = result.replayed ? "REPLAYED" : "EXECUTED";
+    heading.append(badge);
+    container.append(heading);
+
+    const rows = [
+      ["HTTP status", String(result.status)],
+      ["Idempotent-Replayed header", result.replayed ? "true" : "(absent)"],
+      ["Payment id", result.ok ? `#${result.data.id}` : "—"],
+      ["Outcome", result.ok ? result.data.status : describeError(result)],
+      ["Sender balance after", balanceAfter === null ? "—" : rupees(balanceAfter)],
+    ];
+    const dl = document.createElement("dl");
+    for (const [term, value] of rows) {
+      const dt = document.createElement("dt"); dt.textContent = term;
+      const dd = document.createElement("dd"); dd.textContent = value;
+      dl.append(dt, dd);
+    }
+    container.append(dl);
+  }
+
+  $("simulate-retry").addEventListener("click", async (event) => {
+    const button = event.target;
+    const form = $("transfer");
+    if (!form.reportValidity()) return;
+    button.disabled = true;
+    banner("", "");
+    try {
+      const body = transferBody();
+      const key = crypto.randomUUID();
+      const before = await senderBalance(body.from_account_id);
+
+      const first = await api("/transfers", { method: "POST", key, body });
+      const afterFirst = await senderBalance(body.from_account_id);
+
+      const second = await api("/transfers", { method: "POST", key, body });
+      const afterSecond = await senderBalance(body.from_account_id);
+
+      $("retry-key").textContent = key;
+      renderAttempt($("retry-first"), "Request 1", first, afterFirst);
+      renderAttempt($("retry-second"), "Request 2 (retry, same key)", second, afterSecond);
+
+      const summary = $("retry-summary");
+      const sameId = first.ok && second.ok && first.data.id === second.data.id;
+      const movedOnce = afterFirst === afterSecond;
+      summary.textContent = second.replayed && movedOnce
+        ? `Balance went ${rupees(before)} → ${rupees(afterFirst)} → ${rupees(afterSecond)}: the money moved once. `
+          + (sameId ? `Both responses describe the same payment #${first.data.id}. ` : "")
+          + "The retry was answered from the stored response, not re-executed."
+        : "Unexpected: the second request was not replayed. Check the server logs.";
+      $("retry-section").hidden = false;
+      $("retry-section").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      await refreshAccounts();
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  refreshAccounts();
+</script>
+</body>
+</html>

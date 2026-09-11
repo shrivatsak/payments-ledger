@@ -1,5 +1,7 @@
+from pathlib import Path
+
 from fastapi import FastAPI, Header, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app import service
 from app.db import pool
@@ -17,6 +19,13 @@ from app.service import PaymentResult
 
 app = FastAPI(title="Idempotent Payments Ledger API")
 app.add_exception_handler(LedgerError, ledger_error_handler)
+
+DASHBOARD = Path(__file__).parent / "static" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+def dashboard():
+    return FileResponse(DASHBOARD)
 
 
 @app.get("/health")
