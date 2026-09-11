@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `from app... import` works no matter how
+# pytest is launched. `python -m pytest` adds the cwd itself; bare `pytest`
+# (as CI runs it) does not, and tests/ has no __init__.py to anchor it.
+pythonpath = ["."]
+testpaths = ["tests"]
