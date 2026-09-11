@@ -9,6 +9,7 @@ from app.errors import (
     IDEMPOTENCY_KEY_MISMATCH,
     INSUFFICIENT_FUNDS,
     PAYMENT_NOT_FOUND,
+    REFUND_NOT_ALLOWED,
     SAME_ACCOUNT,
     LedgerError,
 )
@@ -174,6 +175,98 @@ def create_transfer(
                 conn, payment["id"], from_account_id, to_account_id, amount_paise
             )
             return _complete(conn, payment)
+
+
+# --- refunds ----------------------------------------------------------------
+
+
+def create_refund(idempotency_key: str, payment_id: int) -> PaymentResult:
+    """Full refund of a completed transfer: the same amount, sent back the other way."""
+    # There is no request body, so the payment being refunded *is* the request.
+    body_hash = request_hash(f"/payments/{payment_id}/refund", {})
+
+    with pool.connection() as conn:
+        with conn.transaction():
+            # Lock the original payment before doing anything else. Every refund
+            # attempt on this payment queues here, so two of them can never both
+            # look, both see no refund yet, and both decide they are allowed.
+            # Locking before the idempotency INSERT also matters: inserting a row
+            # that references this payment takes a FOR KEY SHARE lock on it, and
+            # two transactions each holding KEY SHARE while asking for FOR UPDATE
+            # would deadlock.
+            original = _lock_payment(conn, payment_id)
+
+            refund = _claim_idempotency_key(
+                conn,
+                idempotency_key=idempotency_key,
+                body_hash=body_hash,
+                payment_type="REFUND",
+                from_account_id=original["to_account_id"],
+                to_account_id=original["from_account_id"],
+                amount_paise=original["amount_paise"],
+                refund_of=original["id"],
+            )
+            # Checked after the claim, so retrying a successful refund replays the
+            # stored 201 instead of being told the payment is already refunded.
+            if refund is None:
+                return _replay(conn, idempotency_key, body_hash)
+
+            _assert_refundable(conn, original)
+
+            _lock_accounts(conn, refund["from_account_id"], refund["to_account_id"])
+
+            # The money is refunded out of the original receiver, who may well have
+            # spent it already.
+            balance = _balance(conn, refund["from_account_id"])
+            if balance < refund["amount_paise"]:
+                return _fail_insufficient_funds(conn, refund, balance)
+
+            _write_double_entry(
+                conn,
+                refund["id"],
+                refund["from_account_id"],
+                refund["to_account_id"],
+                refund["amount_paise"],
+            )
+            return _complete(conn, refund)
+
+
+def _lock_payment(conn: Connection, payment_id: int) -> dict:
+    row = conn.execute(
+        "SELECT id, type, status, from_account_id, to_account_id, amount_paise"
+        " FROM payments WHERE id = %s FOR UPDATE",
+        (payment_id,),
+    ).fetchone()
+    if row is None:
+        raise LedgerError(404, PAYMENT_NOT_FOUND, f"Payment {payment_id} does not exist.")
+    return row
+
+
+def _assert_refundable(conn: Connection, original: dict) -> None:
+    """Only a completed transfer that has not been refunded yet can be refunded.
+
+    The caller must already hold the lock on `original`. The partial unique index
+    on payments(refund_of) WHERE status = 'COMPLETED' is the database-level
+    backstop if this check is ever bypassed.
+    """
+    if original["type"] != "TRANSFER" or original["status"] != "COMPLETED":
+        raise LedgerError(
+            409,
+            REFUND_NOT_ALLOWED,
+            f"Only a completed transfer can be refunded; payment {original['id']} is"
+            f" a {original['status']} {original['type']}.",
+        )
+
+    already_refunded = conn.execute(
+        "SELECT 1 FROM payments WHERE refund_of = %s AND status = 'COMPLETED'",
+        (original["id"],),
+    ).fetchone()
+    if already_refunded:
+        raise LedgerError(
+            409,
+            REFUND_NOT_ALLOWED,
+            f"Payment {original['id']} has already been refunded.",
+        )
 
 
 # --- payments ---------------------------------------------------------------

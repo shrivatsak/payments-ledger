@@ -70,6 +70,15 @@ def create_transfer(
     return _payment_response(result)
 
 
+@app.post("/payments/{payment_id}/refund")
+def create_refund(
+    payment_id: int,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
+    key = validate_key(idempotency_key)
+    return _payment_response(service.create_refund(key, payment_id))
+
+
 @app.get("/payments/{payment_id}", response_model=PaymentResponse)
 def get_payment(payment_id: int):
     return service.get_payment(payment_id)
