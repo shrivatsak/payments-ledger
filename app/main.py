@@ -1,8 +1,20 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, Query
+from fastapi.responses import JSONResponse
 
+from app import service
 from app.db import pool
+from app.errors import LedgerError, ledger_error_handler
+from app.idempotency import validate_key
+from app.models import (
+    AccountResponse,
+    CreateAccountRequest,
+    DepositRequest,
+    TransactionResponse,
+)
+from app.service import PaymentResult
 
 app = FastAPI(title="Idempotent Payments Ledger API")
+app.add_exception_handler(LedgerError, ledger_error_handler)
 
 
 @app.get("/health")
@@ -12,3 +24,38 @@ def health():
     with pool.connection() as conn:
         conn.execute("SELECT 1")
     return {"status": "ok"}
+
+
+@app.post("/accounts", status_code=201, response_model=AccountResponse)
+def create_account(request: CreateAccountRequest):
+    return service.create_account(request.owner_name)
+
+
+@app.get("/accounts", response_model=list[AccountResponse])
+def list_accounts():
+    return service.list_accounts()
+
+
+@app.get("/accounts/{account_id}", response_model=AccountResponse)
+def get_account(account_id: int):
+    return service.get_account(account_id)
+
+
+@app.get("/accounts/{account_id}/transactions", response_model=list[TransactionResponse])
+def list_transactions(account_id: int, limit: int = Query(50, ge=1, le=200)):
+    return service.list_transactions(account_id, limit)
+
+
+@app.post("/deposits")
+def create_deposit(
+    request: DepositRequest,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
+    key = validate_key(idempotency_key)
+    result = service.create_deposit(key, request.account_id, request.amount_paise)
+    return _payment_response(result)
+
+
+def _payment_response(result: PaymentResult) -> JSONResponse:
+    headers = {"Idempotent-Replayed": "true"} if result.replayed else None
+    return JSONResponse(status_code=result.status_code, content=result.body, headers=headers)

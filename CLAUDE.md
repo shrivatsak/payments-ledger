@@ -252,7 +252,7 @@ One page, vanilla JS using `fetch`, clean and simple styling in a `<style>` tag:
 ## Milestones (do ONE at a time, then stop)
 
 - [x] **M0 — Scaffold:** layout, requirements.txt, .gitignore, .env.example, docker-compose with db only, `db.py`, `/health`.
-- [ ] **M1 — Accounts & deposits:** schema.sql, accounts endpoints, deposits (with idempotency), balances, tests 1 and 7.
+- [x] **M1 — Accounts & deposits:** schema.sql, accounts endpoints, deposits (with idempotency), balances, tests 1 and 7.
 - [ ] **M2 — Transfers:** locking, double entry, insufficient funds, tests 2 and 3.
 - [ ] **M3 — Idempotency hardening:** replay, mismatch, failed-replay, tests 4, 5, 6.
 - [ ] **M4 — Refunds:** tests 11 and 12.
