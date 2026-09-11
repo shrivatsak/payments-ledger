@@ -150,6 +150,13 @@ def create_transfer(
             _require_account(conn, from_account_id)
             _require_account(conn, to_account_id)
 
+            # Lock before the INSERT below, not after. payments has foreign keys to
+            # accounts, so inserting a payment takes a FOR KEY SHARE lock on both
+            # account rows; asking for FOR UPDATE afterwards is a lock upgrade, and
+            # two opposite transfers each holding KEY SHARE on both rows would
+            # deadlock waiting for each other to release it.
+            _lock_accounts(conn, from_account_id, to_account_id)
+
             payment = _claim_idempotency_key(
                 conn,
                 idempotency_key=idempotency_key,
@@ -161,8 +168,6 @@ def create_transfer(
             )
             if payment is None:
                 return _replay(conn, idempotency_key, body_hash)
-
-            _lock_accounts(conn, from_account_id, to_account_id)
 
             # Read the balance only after the lock is held. Any other transfer out of
             # this account is stuck waiting on the same row, so the number we read
@@ -187,14 +192,17 @@ def create_refund(idempotency_key: str, payment_id: int) -> PaymentResult:
 
     with pool.connection() as conn:
         with conn.transaction():
-            # Lock the original payment before doing anything else. Every refund
-            # attempt on this payment queues here, so two of them can never both
-            # look, both see no refund yet, and both decide they are allowed.
-            # Locking before the idempotency INSERT also matters: inserting a row
-            # that references this payment takes a FOR KEY SHARE lock on it, and
-            # two transactions each holding KEY SHARE while asking for FOR UPDATE
-            # would deadlock.
+            # Take every lock before the INSERT below. Inserting the refund row
+            # references the original payment and both accounts, which takes a
+            # FOR KEY SHARE lock on each; asking for FOR UPDATE afterwards is a
+            # lock upgrade, and two transactions that both hold KEY SHARE deadlock.
+            # Locking the original first also serialises refunds of the same
+            # payment, so two of them can never both see no refund yet and both
+            # decide they are allowed.
             original = _lock_payment(conn, payment_id)
+            _lock_accounts(
+                conn, original["from_account_id"], original["to_account_id"]
+            )
 
             refund = _claim_idempotency_key(
                 conn,
@@ -212,8 +220,6 @@ def create_refund(idempotency_key: str, payment_id: int) -> PaymentResult:
                 return _replay(conn, idempotency_key, body_hash)
 
             _assert_refundable(conn, original)
-
-            _lock_accounts(conn, refund["from_account_id"], refund["to_account_id"])
 
             # The money is refunded out of the original receiver, who may well have
             # spent it already.
@@ -303,9 +309,11 @@ def _claim_idempotency_key(
 
     The row is inserted with a placeholder status/response that gets overwritten
     later in the same transaction, so the placeholder is never visible to anyone.
-    Claiming the key first is what makes simultaneous duplicates safe: if another
-    transaction holds the same key and has not committed yet, Postgres makes this
-    INSERT wait on the unique index instead of letting both requests move money.
+    The unique index on idempotency_key is what makes simultaneous duplicates
+    safe: if another transaction holds the same key and has not committed yet,
+    Postgres makes this INSERT wait on the index instead of letting both requests
+    move money. Callers must already hold the row locks they need (see the
+    comments at the call sites).
     """
     return conn.execute(
         """
